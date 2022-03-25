@@ -22,7 +22,7 @@ from utils import plot_spectrogram, scan_checkpoint, load_checkpoint, save_check
 torch.backends.cudnn.benchmark = True
 
 
-def train(rank, a, h):
+def train(rank, h):
     if h.num_gpus > 1:
         init_process_group(backend=h.dist_config['dist_backend'], init_method=h.dist_config['dist_url'],
                            world_size=h.dist_config['world_size'] * h.num_gpus, rank=rank)
@@ -36,12 +36,12 @@ def train(rank, a, h):
 
     if rank == 0:
         print(generator)
-        os.makedirs(a.checkpoint_path, exist_ok=True)
-        print("checkpoints directory : ", a.checkpoint_path)
+        os.makedirs(h.checkpoint_dir, exist_ok=True)
+        print("checkpoints directory : ", h.checkpoint_dir)
 
-    if os.path.isdir(a.checkpoint_path):
-        cp_g = scan_checkpoint(a.checkpoint_path, 'g_')
-        cp_do = scan_checkpoint(a.checkpoint_path, 'do_')
+    if os.path.isdir(h.checkpoint_dir):
+        cp_g = scan_checkpoint(h.checkpoint_dir, 'g_')
+        cp_do = scan_checkpoint(h.checkpoint_dir, 'do_')
 
     steps = 0
     if cp_g is None or cp_do is None:
@@ -72,12 +72,12 @@ def train(rank, a, h):
     scheduler_g = torch.optim.lr_scheduler.ExponentialLR(optim_g, gamma=h.lr_decay, last_epoch=last_epoch)
     scheduler_d = torch.optim.lr_scheduler.ExponentialLR(optim_d, gamma=h.lr_decay, last_epoch=last_epoch)
 
-    training_filelist, validation_filelist = get_dataset_filelist(a)
+    training_filelist, validation_filelist = get_dataset_filelist(h)
 
     trainset = MelDataset(training_filelist, h.segment_size, h.n_fft, h.num_mels,
                           h.hop_size, h.win_size, h.sampling_rate, h.fmin, h.fmax, n_cache_reuse=0,
                           shuffle=False if h.num_gpus > 1 else True, fmax_loss=h.fmax_for_loss, device=device,
-                          fine_tuning=a.fine_tuning, base_mels_path=a.input_mels_dir)
+                          fine_tuning=h.fine_tuning, base_mels_path=h.input_mels_dir)
 
     train_sampler = DistributedSampler(trainset) if h.num_gpus > 1 else None
 
@@ -90,20 +90,20 @@ def train(rank, a, h):
     if rank == 0:
         validset = MelDataset(validation_filelist, h.segment_size, h.n_fft, h.num_mels,
                               h.hop_size, h.win_size, h.sampling_rate, h.fmin, h.fmax, False, False, n_cache_reuse=0,
-                              fmax_loss=h.fmax_for_loss, device=device, fine_tuning=a.fine_tuning,
-                              base_mels_path=a.input_mels_dir)
+                              fmax_loss=h.fmax_for_loss, device=device, fine_tuning=h.fine_tuning,
+                              base_mels_path=h.input_mels_dir)
         validation_loader = DataLoader(validset, num_workers=1, shuffle=False,
                                        sampler=None,
                                        batch_size=1,
                                        pin_memory=True,
                                        drop_last=True)
 
-        sw = SummaryWriter(os.path.join(a.checkpoint_path, 'logs'))
+        sw = SummaryWriter(os.path.join(h.checkpoint_dir, 'logs'))
 
     generator.train()
     mpd.train()
     msd.train()
-    for epoch in range(max(0, last_epoch), a.training_epochs):
+    for epoch in range(max(0, last_epoch), h.training_epochs):
         if rank == 0:
             start = time.time()
             print("Epoch: {}".format(epoch+1))
@@ -158,7 +158,7 @@ def train(rank, a, h):
 
             if rank == 0:
                 # STDOUT logging
-                if steps % a.stdout_interval == 0:
+                if steps % h.stdout_interval == 0:
                     with torch.no_grad():
                         mel_error = F.l1_loss(y_mel, y_g_hat_mel).item()
 
@@ -166,12 +166,12 @@ def train(rank, a, h):
                           format(steps, loss_gen_all, mel_error, time.time() - start_b))
 
                 # checkpointing
-                if steps % a.checkpoint_interval == 0 and steps != 0:
-                    checkpoint_path = "{}/g_{:08d}".format(a.checkpoint_path, steps)
-                    save_checkpoint(checkpoint_path,
+                if steps % h.checkpoint_interval == 0 and steps != 0:
+                    checkpoint_dir = "{}/g_{:08d}".format(h.checkpoint_dir, steps)
+                    save_checkpoint(checkpoint_dir,
                                     {'generator': (generator.module if h.num_gpus > 1 else generator).state_dict()})
-                    checkpoint_path = "{}/do_{:08d}".format(a.checkpoint_path, steps)
-                    save_checkpoint(checkpoint_path, 
+                    checkpoint_dir = "{}/do_{:08d}".format(h.checkpoint_dir, steps)
+                    save_checkpoint(checkpoint_dir, 
                                     {'mpd': (mpd.module if h.num_gpus > 1
                                                          else mpd).state_dict(),
                                      'msd': (msd.module if h.num_gpus > 1
@@ -180,12 +180,12 @@ def train(rank, a, h):
                                      'epoch': epoch})
 
                 # Tensorboard summary logging
-                if steps % a.summary_interval == 0:
+                if steps % h.summary_interval == 0:
                     sw.add_scalar("training/gen_loss_total", loss_gen_all, steps)
                     sw.add_scalar("training/mel_spec_error", mel_error, steps)
 
                 # Validation
-                if steps % a.validation_interval == 0:  # and steps != 0:
+                if steps % h.validation_interval == 0:  # and steps != 0:
                     generator.eval()
                     torch.cuda.empty_cache()
                     val_err_tot = 0
@@ -224,9 +224,9 @@ def train(rank, a, h):
         if rank == 0:
             print('Time taken for epoch {} is {} sec\n'.format(epoch + 1, int(time.time() - start)))
     # save model
-    checkpoint_path = "{}/g_{:08d}".format(a.model_path, steps)
+    checkpoint_dir = "{}/g_{:08d}".format(h.model_dir, steps)
     save_checkpoint(
-        checkpoint_path,{'generator': (generator.module if h.num_gpus > 1 else generator).state_dict()}
+        checkpoint_dir,{'generator': (generator.module if h.num_gpus > 1 else generator).state_dict()}
     )
 
 def main():
@@ -238,8 +238,8 @@ def main():
     hps.setdefault('input_mels_dir', 'ft_dataset')
     hps.setdefault('input_training_file', os.path.join(os.environ.get('SM_CHANNEL_TRAINING'),'training.txt'))
     hps.setdefault('input_validation_file', os.path.join(os.environ.get('SM_CHANNEL_TRAINING'),'validation.txt'))
-    hps.setdefault('checkpoint_path', os.environ.get('SM_OUTPUT_DATA_DIR'))
-    hps.setdefault('model_path', os.environ.get('SM_MODEL_DIR'))
+    hps.setdefault('checkpoint_dir', os.environ.get('SM_OUTPUT_DATA_DIR'))
+    hps.setdefault('model_dir', os.environ.get('SM_MODEL_DIR'))
     hps.setdefault('config', '')
     hps.setdefault('training_epochs', 3100)
     hps.setdefault('stdout_interval', 5)
@@ -247,17 +247,46 @@ def main():
     hps.setdefault('summary_interval', 100)
     hps.setdefault('validation_interval', 1000)
     hps.setdefault('fine_tuning', False)
+    hps.setdefault('seed', 1234)
+    hps.setdefault('resblock', '1')
+    hps.setdefault('num_gpus', 0)
+    hps.setdefault('batch_size', 16)
+    hps.setdefault('learning_rate', 0.0002)
+    hps.setdefault('adam_b1', 0.8)
+    hps.setdefault('adam_b2', 0.99)
+    hps.setdefault('lr_decay', 0.999)
     
-    a = AttrDict(hps)
+    hps.setdefault('upsample_rates', [8,8,2,2])
+    hps.setdefault('upsample_kernel_sizes', [16,16,4,4])
+    hps.setdefault('upsample_initial_channel', 512)
+    hps.setdefault('resblock_kernel_sizes', [3,7,11])
+    hps.setdefault('resblock_dilation_sizes', [[1,3,5], [1,3,5], [1,3,5]])
     
-    with open(a.config) as f:
-        data = f.read()
+    hps.setdefault('segment_size', 8192)
+    hps.setdefault('num_mels', 80)
+    hps.setdefault('num_freq', 1025)
+    hps.setdefault('n_fft', 1024)
+    hps.setdefault('hop_size', 256)
+    hps.setdefault('win_size', 1024)
+    
+    hps.setdefault('sampling_rate', 22050)
+    
+    hps.setdefault('fmin', 0)
+    hps.setdefault('fmax', 8000)
+    hps.setdefault('fmax_for_loss', None)
 
+    hps.setdefault('num_workers', 4)
     
-        
-    json_config = json.loads(data)
-    h = AttrDict(json_config)
-    build_env(a.config, 'config.json', a.checkpoint_path)
+    hps.setdefault(
+        'dist_config',
+        {
+            "dist_backend": "nccl",
+            "dist_url": "tcp://localhost:54321",
+            "world_size": 1
+        }
+    )
+    h = AttrDict(hps)
+    print(h)
 
     torch.manual_seed(h.seed)
     if torch.cuda.is_available():
@@ -269,9 +298,9 @@ def main():
         pass
 
     if h.num_gpus > 1:
-        mp.spawn(train, nprocs=h.num_gpus, args=(a, h,))
+        mp.spawn(train, nprocs=h.num_gpus, args=(h,))
     else:
-        train(0, a, h)
+        train(0, h)
 
 
 if __name__ == '__main__':
